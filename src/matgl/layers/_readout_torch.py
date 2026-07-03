@@ -6,6 +6,7 @@ backend code path. Used internally by both
 :mod:`matgl.layers._readout` and a handful of DGL readouts that
 expose tensor-level helpers.
 """
+#打算在readout时加入一种新的方式也就是transformer的方式，因此此版本为transfomer版本
 
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
+from torch_geometric.utils import to_dense_batch #PyG 的 node_feat 是 [总原子数, hidden_dim]，Transformer 要吃 [batch_size, max_atoms, hidden_dim]，所以用 to_dense_batch 做 padding 和 mask。
 
 from matgl.utils.maths import scatter_add
 
