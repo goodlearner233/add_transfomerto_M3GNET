@@ -560,3 +560,229 @@ for their contributions to warp-acceleration for TensorNet, which yielded ~2-3x 
 [MatCalc]: https://matcalc.ai
 [Materials Virtual Lab Docker Repository]: https://hub.docker.com/orgs/materialsvirtuallab/repositories
 [Hugging Face Hub]: https://huggingface.co
+# Transformer Readout for M3GNet PES Training in MatGL
+
+This repository contains an experimental modification of the PyG version of M3GNet in MatGL. The main change is to add a DiepFormer-style Transformer readout at the final readout stage, while keeping the original M3GNet three-body interactions and graph convolution/message-passing blocks unchanged.
+
+Progress Note: Transformer Readout for M3GNet PES Training in MatGL
+Objective
+
+The current goal is to modify the PyG version of M3GNet in MatGL by adding a DiepFormer-style Transformer readout at the final readout stage.
+
+At this stage, the original M3GNet three-body interaction and graph convolution/message-passing blocks are not modified. The experiment only replaces the final readout stage with a Transformer-based readout and tests whether it can be used for PES training.
+
+Modified Files
+
+The main modified files are:
+
+D:\MEGNET_GITHUB\matgl\src\matgl\layers\_readout_torch.py
+D:\MEGNET_GITHUB\matgl\src\matgl\models\_m3gnet.py
+
+The testing notebook is:
+
+D:\MEGNET_GITHUB\matgl\test_m3gnet_transformer_pes.ipynb
+1. Added TransformerReadOut in _readout_torch.py
+
+A new class was added:
+
+class TransformerReadOut(nn.Module)
+
+The core logic is:
+
+node_feat: [total number of atoms, hidden_dim]
+batch: graph index for each atom
+
+↓ to_dense_batch
+
+padded node features:
+[batch_size, max_num_atoms, hidden_dim]
+
+↓ TransformerEncoder
+
+node features are updated by global self-attention within each structure
+
+↓ masked max pooling
+
+one graph-level vector is obtained for each structure
+
+↓ Linear layer
+
+output energy / property
+
+The current readout pipeline is:
+
+node features after M3GNet blocks
+-> TransformerEncoder
+-> max pooling over atoms
+-> Linear
+-> graph energy
+
+This Transformer is only used at the readout stage. It does not replace the message-passing or three-body interaction inside the M3GNet blocks.
+
+2. Added a Transformer readout branch in _m3gnet.py
+
+The following import was added:
+
+from matgl.layers._readout_torch import TransformerReadOut
+
+The readout_type argument in M3GNet.__init__ was extended to include:
+
+readout_type: Literal["set2set", "weighted_atom", "reduce_atom", "transformer"]
+
+The following Transformer-related hyperparameters were added:
+
+transformer_nhead
+transformer_num_layers
+transformer_dim_ff
+transformer_dropout
+
+Inside the is_intensive=True branch, a new readout option was added:
+
+elif readout_type == "transformer":
+    self.final_layer = TransformerReadOut(...)
+
+In the forward method, the following branch was added:
+
+if self.readout_type == "transformer":
+    output = self.final_layer(node_feat, batch)
+
+Therefore, the current Transformer-M3GNet route is:
+
+structure
+-> graph
+-> bond distance / three-body basis
+-> M3GNet interaction blocks
+-> final node_feat
+-> TransformerReadOut
+-> energy
+3. PES Training Logic
+
+The M3GNet model itself directly outputs energy:
+
+M3GNet:
+    graph -> energy
+
+The Potential wrapper then computes forces and stresses from the energy:
+
+Potential:
+    energy -> forces / stresses
+    forces = -dE/dR
+    stress = dE/dstrain / volume
+
+The PotentialLightningModule computes the combined training losses:
+
+PotentialLightningModule:
+    energy loss + force loss + stress loss
+
+The Lightning Trainer then performs:
+
+backward + optimizer step
+
+So the actual training stack is:
+
+M3GNet + TransformerReadOut
+-> wrapped by Potential
+-> wrapped by PotentialLightningModule
+-> trained by Lightning Trainer
+4. Testing Process
+
+A single-structure test was first performed:
+
+Si structure
+-> model.predict_structure
+-> Potential computes forces
+
+This confirmed that:
+
+final layer = TransformerReadOut
+energy can be produced
+forces have the correct shape
+forces finite = True
+
+A toy PES dataset was then tested:
+
+6 Si structures
+manually assigned energies
+forces = 0
+
+This confirmed that the full training pipeline can run:
+
+MGLDataset
+MGLDataLoader
+PotentialLightningModule
+trainer.fit
+trainer.test
+
+After this, real data was used.
+
+5. Real Data Test
+
+The real dataset used was:
+
+materialyze/matpes
+MatPES-PBE-2025.2.json
+
+Subsets were first extracted from the full dataset:
+
+N = 200
+N = 1000
+
+One important detail is that the stress in MatPES is stored in 6-dimensional Voigt notation:
+
+[xx, yy, zz, yz, xz, xy]
+
+However, MatGL Potential outputs stress as a 3×3 tensor. Therefore, before training, the stress labels were converted to 3×3 format using:
+
+ase.stress.voigt_6_to_full_3x3_stress
+6. GPU and Second-Order Gradient Issue
+
+PES training with force and stress requires second-order or mixed gradients, because:
+
+force = -dE/dR
+force_loss backward -> d²E / dR dW
+
+Some fast Transformer attention kernels do not support the required second-order gradients. Therefore, during training, the attention backend was forced to use the math implementation:
+
+with sdpa_kernel(SDPBackend.MATH):
+    trainer.fit(...)
+
+CUDA-enabled PyTorch was also installed, and training was run using an RTX 4060 Laptop GPU:
+
+torch 2.11.0+cu128
+cuda available = True
+7. Preliminary Results
+
+Experimental setup:
+
+Dataset: MatPES-PBE-2025.2
+Subset size: N = 1000
+Train / validation / test split: 800 / 100 / 100
+Epochs: 5
+Batch size: 2
+energy_weight = 1.0
+force_weight = 1.0
+stress_weight = 0.1
+
+The Transformer-M3GNet model has:
+
+296,604 trainable parameters
+
+Transformer-M3GNet test results:
+
+Energy_MAE: 0.2749 eV/atom
+Force_MAE:  0.2369 eV/Å
+Stress_MAE: 3.5535 GPa
+Total_Loss: 0.4516
+
+Original M3GNet baseline test results:
+
+Energy_MAE: 0.4154 eV/atom
+Force_MAE:  0.2460 eV/Å
+Stress_MAE: 3.5629 GPa
+Total_Loss: 0.5369
+
+Preliminary observation:
+
+The Transformer readout clearly improves the energy MAE.
+The force MAE is slightly improved.
+The stress MAE is almost unchanged.
