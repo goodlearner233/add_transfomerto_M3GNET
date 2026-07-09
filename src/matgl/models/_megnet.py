@@ -96,7 +96,7 @@ class MEGNet(MatGLModel):#MATGL继承nn.Module，MEGNet继承MatGLModel，也就
         self.node_encoder = MLP(node_dims, activation, activate_last=True)
         self.state_encoder = MLP(state_dims, activation, activate_last=True)
          #调用 MLP 把初始的 edge/node/state embedding 投影到统一的维度空间，各自的输入->64->32
-         dim_blocks_in = hidden_layer_sizes_input[-1]
+        dim_blocks_in = hidden_layer_sizes_input[-1]
         dim_blocks_out = hidden_layer_sizes_conv[-1]#block后输出的维度是 hidden_layer_sizes_conv 的最后一个元素，也就是 32
         block_args = {
             "conv_hiddens": list(hidden_layer_sizes_conv),#MEGNetBlock 内部 MLP 的隐藏层结构

@@ -89,14 +89,13 @@ from matgl.layers import (
     SphericalBesselWithHarmonics,#对应公式2，把三体几何距离+角度变成三体特征向量
     ThreeBodyInteractions,#三体信息聚合回边e_ij
 )
-from matgl.layers._readout_torch import ReduceReadOut, WeightedAtomReadOut, WeightedReadOut  # Reduce/Weighted readout，用于普通性质或势能分支
+from matgl.layers._readout_torch import ReduceReadOut, TransformerReadOut, WeightedAtomReadOut, WeightedReadOut  # Reduce/Weighted readout，用于普通性质或势能分支
 from matgl.utils.cutoff import polynomial_cutoff  # 三体 cutoff，让远距离三体作用平滑衰减到 0
 
 from ._core import MatGLModel, _warn_feature_dict_kwarg
 
 if TYPE_CHECKING:
     from matgl.graph._converters import GraphConverter
-
 logger = logging.getLogger(__name__)
 
 
@@ -118,7 +117,11 @@ class M3GNet(MatGLModel):
         nblocks: int = 3,  # M3GNet 层数，每层先 three-body 再 graph conv
         rbf_type: Literal["Gaussian", "SphericalBessel"] = "SphericalBessel",  # 二体距离展开方式，默认球贝塞尔
         is_intensive: bool = True,  # True 做普通性质预测；False 做总能量/势函数 sum
-        readout_type: Literal["set2set", "weighted_atom", "reduce_atom"] = "weighted_atom",  # 普通性质预测时的聚合方式
+        readout_type: Literal["set2set", "weighted_atom", "reduce_atom", "transformer"] = "weighted_atom",  # 普通性质预测时的聚合方式,我加入了 transformer 方式
+        transformer_nhead: int = 8,  # Transformer readout 的多头 attention 头数
+        transformer_num_layers: int = 3,  # TransformerEncoderLayer 堆叠层数
+        transformer_dim_ff: int = 256,  # Transformer 内部 FFN/MLP 隐藏维度
+        transformer_dropout: float = 0.1,  # Transformer 内部 dropout
         task_type: Literal["classification", "regression"] = "regression",  # 任务类型，默认回归
         cutoff: float = 5.0,  # 二体边截断半径
         threebody_cutoff: float = 4.0,  # 三体相互作用截断半径
@@ -216,21 +219,38 @@ class M3GNet(MatGLModel):
             if readout_type == "set2set":  # 如果选择 Set2Set 聚合，势函数主线一般不走这里
                 if field != "node_feat": #只能对节点特征做 Set2Set 聚合，边特征暂时不支持
                     raise NotImplementedError("Set2Set readout on edge features is not implemented for PyG yet.")
-                self.readout = Set2SetReadOut(  # type: ignore[call-arg]
+                self.readout = Set2SetReadOut(  # type: ignore[call-arg]#Set2Set 是一种比较复杂的集合聚合方法，内部有 LSTM attention。它把所有节点看成一个无序集合，然后学一个 graph representation。
                     in_feats=input_feats, n_iters=niters_set2set, n_layers=nlayers_set2set
                 )
                 readout_feats = 2 * input_feats + dim_state_feats_used if include_state else 2 * input_feats  #set2set输出维度是 2 * input_feats，如果有 state 就加上 state 的维度
             elif readout_type == "weighted_atom":  # 默认 weighted atom 聚合分支
-                self.readout = WeightedAtomReadOut(  # type: ignore[assignment]  #对原子特征做带权重的聚合
+                self.readout = WeightedAtomReadOut(  # type: ignore[assignment]  #对原子特征做带权重的聚合 #这是默认分支。#它不是简单平均，而是给每个原子一个可学习权重：
+
                     in_feats=input_feats, dims=[units, units], activation=activation
                 )
                 readout_feats = units + dim_state_feats_used if include_state else units
+            elif readout_type == "transformer":#新加的transformer readout 分支，参考 DiepFormer 论文
+                if field != "node_feat":
+                    raise NotImplementedError("Transformer readout only supports node features.")
+                if include_state:
+                    raise NotImplementedError("Transformer readout with state features is not implemented.")
+                # self.final_layer = TransformerReadOut(
+                #     in_feats=input_feats,
+                #     num_targets=ntargets,
+                self.final_layer = TransformerReadOut(#使用定义的超参数，不然就要用readout 文件中定义的默认值了
+                    in_feats=input_feats,
+                    num_targets=ntargets,
+                    nhead = transformer_nhead,
+                    num_layers = transformer_num_layers,
+                    dim_ff = transformer_dim_ff,
+                    dropout = transformer_dropout,
+                ) 
             else:
                 self.readout = ReduceReadOut("mean", field=field)  # type: ignore[assignment] #这里是最简单的readout，求所有节点/边特征求平均
                 readout_feats = input_feats + dim_state_feats_used if include_state else input_feats
-
-            dims_final_layer = [readout_feats, units, units, ntargets]  # 最终 MLP 的维度：graph vector -> 输出
-            self.final_layer = MLP(dims_final_layer, activation, activate_last=False)  # 普通性质预测的输出 MLP
+            if readout_type != "transformer":#transformer readout 分支不需要 MLP，直接输出 graph vector
+                dims_final_layer = [readout_feats, units, units, ntargets]  # 最终 MLP 的维度：graph vector -> 输出
+                self.final_layer = MLP(dims_final_layer, activation, activate_last=False)  # 普通性质预测的输出 MLP
             if task_type == "classification":
                 self.sigmoid = nn.Sigmoid()  # 分类任务最后接 sigmoid
         else:#如果是 extensive 能量预测分支，输出随原子数简单相加
@@ -254,10 +274,10 @@ class M3GNet(MatGLModel):
         self.field = field
         self.readout_type = readout_type
 
-    def _readout(self, node_feat: torch.Tensor, edge_feat: torch.Tensor, batch: torch.Tensor | None) -> torch.Tensor:#根据设置，决定最后 readout 时用 node_feat 还是 edge_feat。
+    def _readout(self, node_feat: torch.Tensor, edge_feat: torch.Tensor, batch: torch.Tensor | None) -> torch.Tensor:#根据设置，决定最后 readout 时用 node_feat 还是 edge_feat。就这个一个功能
         """Dispatch the configured readout on the right field tensor."""
         x = node_feat if self.field == "node_feat" else edge_feat  # 根据 field 选择读出节点特征或边特征
-        if isinstance(self.readout, ReduceReadOut):
+        if isinstance(self.readout, ReduceReadOut):#isinstance(self.readout, ReduceReadOut) 是在判断：self.readout 这个对象是不是 ReduceReadOut 类的实例，反正有点冗余
             return self.readout(x, batch)
         return self.readout(x, batch)
 
@@ -358,15 +378,20 @@ class M3GNet(MatGLModel):
                 "state_feat": state_feat,
             }
 
-        if self.is_intensive: #readout输出分两种情况
-            field_vec = self._readout(node_feat, edge_feat, batch)  # 普通性质分支：把 node/edge 特征聚合成 graph vector
-            if self.include_state and state_feat is not None:
-                state_view = state_feat.view(num_graphs, -1)  # 把 state_feat 整理成每个 graph 一行
-                readout_vec = torch.hstack([field_vec, state_view])  # 如果使用 state，就把 graph vector 和 state 拼接
+        if self.is_intensive: #readout输出分两种情况,这里加入了transfomer分支
+            if self.readout_type == "transformer":
+                output = self.final_layer(node_feat, batch)
+                fea_dict["readout"] = output
+        
             else:
-                readout_vec = field_vec
-            fea_dict["readout"] = readout_vec
-            output = self.final_layer(readout_vec)  # 普通性质分支：graph vector 经过 MLP 得到输出
+                field_vec = self._readout(node_feat, edge_feat, batch)  # 普通性质分支：把 node/edge 特征聚合成 graph vector
+                if self.include_state and state_feat is not None:
+                    state_view = state_feat.view(num_graphs, -1)  # 把 state_feat 整理成每个 graph 一行
+                    readout_vec = torch.hstack([field_vec, state_view])  # 如果使用 state，就把 graph vector 和 state 拼接
+                else:
+                    readout_vec = field_vec
+                fea_dict["readout"] = readout_vec
+                output = self.final_layer(readout_vec)  # 普通性质分支：graph vector 经过 MLP 得到输出
             if self.task_type == "classification":
                 output = self.sigmoid(output)
         else:#如果readout走 extensive 能量预测分支，输出随原子数简单相加

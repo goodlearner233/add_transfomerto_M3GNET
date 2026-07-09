@@ -35,3 +35,8 @@ wandb/
 lightning_logs/
 examples/md.log
 .claude/
+logs/
+tmp_*/
+MatPES-*.json
+*.ckpt
+.ipynb_checkpoints/

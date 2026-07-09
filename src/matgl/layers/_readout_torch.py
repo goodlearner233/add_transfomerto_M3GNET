@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-class WeightedAtomReadOut(nn.Module):
+class WeightedAtomReadOut(nn.Module):#这是intensive属性的方法包括forward
     """Weighted atom readout for graph properties using pure PyTorch tensors.
 
     This follows the TensorFlow WeightedReadout implementation:
@@ -166,3 +166,56 @@ class WeightedReadOut(nn.Module):
 
     def forward(self, node_feat: torch.Tensor) -> torch.Tensor:
         return self.gated(node_feat)
+
+class TransformerReadOut(nn.Module):  # 定义 transformer readout 类
+    """DiepFormer-style Transformer readout for PyG node features."""
+
+    def __init__(
+        self,
+        in_feats: int,  # 输入节点特征维度
+        num_targets: int,  # 输出目标个数，比如预测一个能量就是 1
+        nhead: int = 8,  # 多头 attention 的头数
+        num_layers: int = 3,  # TransformerEncoder 堆几层
+        dim_ff: int = 256,  # 内部 FFN/MLP 的隐藏维度
+        dropout: float = 0.1,  # dropout 比例
+    ):
+        super().__init__()
+
+        # 调用 PyTorch Transformer API，内部包含 Q/K/V attention、FFN、LayerNorm、残差等
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=in_feats,#输入每个原子的向量维度
+            nhead=nhead,#多头 attention 数量
+            dim_feedforward=dim_ff,#FFN/MLP 的隐藏维度
+            dropout=dropout,
+            batch_first=True,  # 输入格式是 [batch, atoms, dim]
+            norm_first=True,  # 先做 LayerNorm，再做 attention/FFN
+        )
+
+        self.transformer = nn.TransformerEncoder(  # 把 encoder layer 堆起来
+            encoder_layer,
+            num_layers=num_layers,
+            enable_nested_tensor=False,
+        )
+        self.out_layer = nn.Linear(in_feats, num_targets)  #transformer最后得到一个结构级别的向量 ，但最终要输出目标
+        
+    def forward(self, node_feat: torch.Tensor, batch: torch.Tensor | None = None) -> torch.Tensor:
+        # """定义 forward 函数：
+        # 输入:node_feat 是 torch.Tensorbatch 是 torch.Tensor 或 None，默认是 None
+        # 输出：返回 torch.Tensor"""
+        # """Read out graph-level targets from node features."""
+        if batch is None:
+            batch = torch.zeros(node_feat.size(0), dtype=torch.long, device=node_feat.device)        #如果没有batch也就是预测一个结构时，创建一个batch全0，意思是所有原子都属于同一个图
+        
+        padded, mask = to_dense_batch(node_feat, batch)  # PyG 的 node_feat 是 [总原子数, hidden_dim]，Transformer 要吃 [batch_size, max_atoms, hidden_dim]，所以用 to_dense_batch 做 padding 和 mask。
+        # """padded 是 [batch_size, max_atoms, hidden_dim]，mask 是 [batch_size, max_atoms]，True 表示有效原子，False 表示 padding 原子"""
+
+        trans_out = self.transformer(
+            padded,
+            src_key_padding_mask=~mask,  # Transformer 的 padding mask 是 True 表示 padding，False 表示有效原子，所以要取反
+        )
+        #  """Tranout的结构是 [batch_size, max_atoms, hidden_dim]，每个原子都经过了 Transformer 编码，一个向量"""
+        # """但预测需要一个结构一个向量，所以需要对每个结构的原子向量做池化，得到一个结构向量"""
+        trans_out = trans_out.masked_fill(~mask.unsqueeze(-1), -1e9)#凡是 padding 假节点的位置，都填成 -1e9
+        graph_repr = trans_out.max(dim=1).values  # masked max pooling：对原子维度取最大值，每个特征维度分别取 max，得到结构向量
+
+        return self.out_layer(graph_repr)  # 最后通过一个线性层输出目标
