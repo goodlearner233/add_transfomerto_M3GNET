@@ -578,60 +578,147 @@ for their contributions to warp-acceleration for TensorNet, which yielded ~2-3x 
 
 ## Overview
 
-This repository contains a research modification of the PyTorch Geometric
-implementation of M3GNet in MatGL.
+This repository contains a research modification of the PyTorch Geometric implementation of **M3GNet** in **MatGL**.
 
-The original M3GNet message-passing and three-body interaction layers are
-retained. A Transformer encoder is added after the final M3GNet block to
-update the atom representations before the energy readout.
+The original M3GNet message-passing blocks and three-body interaction layers are retained. A Transformer encoder is added after the final M3GNet block to update the atomic representations before the energy readout.
 
-Unlike the previous max-pooling implementation, this version predicts an
-energy contribution for every atom and sums the atomic contributions to
-obtain the total energy.
+Unlike the earlier max-pooling implementation, this version predicts an energy contribution for each atom and sums the atomic contributions to obtain the total graph energy.
+
+> **Main idea:** use global self-attention to update atomic features while preserving the extensive atomic-energy-sum structure of the original M3GNet potential.
+
+---
 
 ## Architecture
 
 ```text
 Structure
-→ graph construction and basis expansion
-→ M3GNet three-body interactions
-→ M3GNet edge/node/state updates
-→ final atom features
-→ TransformerEncoder
-→ per-atom GatedMLP
-→ atomic energy contributions
-→ sum over atoms
-→ total energy
-
+    ↓
+Graph construction and basis expansion
+    ↓
+M3GNet three-body interactions
+    ↓
+M3GNet edge, node, and state updates
+    ↓
+Final atomic features
+    ↓
+TransformerEncoder
+    ↓
+Per-atom GatedMLP
+    ↓
+Atomic energy contributions
+    ↓
+Sum over atoms
+    ↓
+Total energy
+```
 
 Mathematically:
-H' = TransformerEncoder(H)
-epsilon_i = GatedMLP(h'_i)
-E_graph = sum_i epsilon_i
 
+\[
+H' = \operatorname{TransformerEncoder}(H)
+\]
 
-The Transformer performs global self-attention between atoms belonging to
-the same graph. Batched PyG node features are converted to dense tensors
-with to_dense_batch, and padding atoms are excluded using a mask.
-No additional positional encoding is introduced into the Transformer.
-Geometric information has already been incorporated into the node features
-by the M3GNet distance basis, three-body interactions, and graph convolutions.
-Modified Files
-src/matgl/layers/_readout_torch.py
-Adds TransformerAtomicReadOut.
-Applies TransformerEncoder to the final atom features.
-Uses the existing gated atomic readout to predict atomic energies.
+\[
+\varepsilon_i = \operatorname{GatedMLP}(h'_i)
+\]
 
-src/matgl/models/_m3gnet.py
-Adds the Transformer atomic-sum branch to the extensive M3GNet path.
-Passes the PyG batch tensor to the Transformer readout.
-Sums atomic energy contributions independently for each graph.
+\[
+E_{\mathrm{graph}} = \sum_i \varepsilon_i
+\]
 
-extensive_test.ipynb
-Contains forward-pass checks, MatPES dataset preparation, training,
-validation, testing, and comparisons with the original M3GNet model.
+The Transformer performs global self-attention between atoms belonging to the same graph.
 
-Model Usage
+Batched PyG node features are converted into dense tensors using `to_dense_batch`, while padded atoms are excluded from attention and pooling through a padding mask.
+
+No additional positional encoding is currently introduced into the Transformer. Geometric information has already been incorporated into the atomic features through:
+
+- radial distance basis functions;
+- M3GNet three-body interactions;
+- edge, node, and state updates;
+- graph message passing.
+
+---
+
+## Key Difference from the Previous Version
+
+### Previous Transformer max-pooling readout
+
+```text
+M3GNet atom features
+    ↓
+TransformerEncoder
+    ↓
+Masked max pooling
+    ↓
+Graph-level energy
+```
+
+This formulation does not naturally scale with the number of atoms.
+
+### Current Transformer atomic-sum readout
+
+```text
+M3GNet atom features
+    ↓
+TransformerEncoder
+    ↓
+Per-atom energy prediction
+    ↓
+Atomic summation
+    ↓
+Total energy
+```
+
+The current implementation restores an extensive output form:
+
+\[
+E_{\mathrm{total}} = \sum_i E_i
+\]
+
+---
+
+## Modified Files
+
+### `src/matgl/layers/_readout_torch.py`
+
+Adds the `TransformerAtomicReadOut` class.
+
+Main operations:
+
+- applies `TransformerEncoder` to the final atomic features;
+- converts sparse batched node features with `to_dense_batch`;
+- masks padded atoms during self-attention;
+- converts the dense Transformer output back to valid atomic features;
+- uses the existing gated atomic readout to predict atomic energy contributions.
+
+### `src/matgl/models/_m3gnet.py`
+
+Adds the Transformer atomic-sum readout branch to the extensive M3GNet path.
+
+Main changes:
+
+- adds `"transformer"` as a supported `readout_type`;
+- adds Transformer hyperparameters;
+- passes the PyG `batch` tensor to the Transformer readout;
+- sums atomic energy contributions independently for each graph.
+
+### `extensive_test.ipynb`
+
+Contains:
+
+- forward-pass checks;
+- MatPES dataset preparation;
+- stress conversion;
+- dataset splitting;
+- PES training;
+- validation and testing;
+- comparison with the original M3GNet model.
+
+---
+
+## Model Usage
+
+```python
 from matgl.config import DEFAULT_ELEMENTS
 from matgl.models._m3gnet import M3GNet
 
@@ -647,12 +734,19 @@ model = M3GNet(
 
 print(type(model.final_layer).__name__)
 # TransformerAtomicReadOut
-is_intensive=False is required because this implementation predicts
-extensive total energies through atomic energy summation.
-A newly initialized model has random parameters and must be trained or
-loaded from a trained checkpoint before being used for scientific prediction.
-PES Training
-The model can be wrapped with MatGL's PotentialLightningModule:
+```
+
+`is_intensive=False` is required because this implementation predicts an extensive total energy through atomic energy summation.
+
+A newly initialized model contains random parameters. It must be trained or loaded from a trained checkpoint before being used for scientific prediction.
+
+---
+
+## PES Training
+
+The model can be trained using MatGL's `PotentialLightningModule`:
+
+```python
 from matgl.utils.training import PotentialLightningModule
 
 lit_model = PotentialLightningModule(
@@ -663,11 +757,38 @@ lit_model = PotentialLightningModule(
     loss="huber_loss",
     lr=1e-3,
 )
-Force training differentiates the predicted energy with respect to atomic
-coordinates and then backpropagates the force loss through that derivative.
-This requires second-order derivatives.
-In the tested PyTorch environment, the mathematical scaled-dot-product
-attention backend was used to support the required higher-order gradients:
+```
+
+The training pipeline is:
+
+```text
+M3GNet + TransformerAtomicReadOut
+    ↓
+Potential
+    ↓
+PotentialLightningModule
+    ↓
+Lightning Trainer
+```
+
+The model directly predicts energy. Forces and stresses are obtained through energy derivatives:
+
+\[
+F_i = -\frac{\partial E}{\partial r_i}
+\]
+
+Force-loss backpropagation therefore requires mixed second-order derivatives:
+
+\[
+\frac{\partial}{\partial W}
+\left(
+\frac{\partial E}{\partial r_i}
+\right)
+\]
+
+In the tested PyTorch environment, the mathematical scaled-dot-product attention backend was used because some optimized attention kernels did not support the required higher-order gradients.
+
+```python
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 with sdpa_kernel(SDPBackend.MATH):
@@ -676,29 +797,112 @@ with sdpa_kernel(SDPBackend.MATH):
         train_dataloaders=train_loader,
         val_dataloaders=val_loader,
     )
-Preliminary Results
-A grouped MatPES-PBE-2025.2 subset containing 5,000 structures was split by
-the parent original_mp_id to prevent related configurations from appearing
-in different subsets.
-Model	Energy MAE (eV/atom)	Force MAE (eV/A)	Stress MAE (GPa)	Total Loss
-Transformer atomic-sum M3GNet	0.1842	0.2853	1.5402	0.2612
-Original M3GNet	0.1603	0.2843	1.5678	0.2548
+```
 
-The atomic-sum Transformer version is substantially more suitable for
-variable-size PES data than the earlier Transformer max-pooling readout.
-However, it did not outperform the original M3GNet overall in this
-preliminary experiment. It produced similar force accuracy and slightly
-better stress MAE, while the original M3GNet achieved better energy MAE.
-Limitations
-Global self-attention has quadratic complexity in the number of atoms.
-Attention is applied globally within each crystal rather than only over
-graph neighbors.
-Atomic summation restores an extensive output form, but global attention
-does not strictly guarantee size consistency for disconnected systems.
-The current results are preliminary and based on relatively small subsets.
-Additional hyperparameter searches and larger controlled experiments are
-required before drawing conclusions about model accuracy.
-Branches
-transformer-readout-m3gnet: earlier Transformer max-pooling readout.
-transformer-atomic-sum-readout: current Transformer atomic-energy-sum
-implementation.
+---
+
+## Dataset Preparation
+
+A subset of **MatPES-PBE-2025.2** was used for the preliminary experiment.
+
+The dataset was grouped and split according to the parent `original_mp_id` to reduce data leakage and prevent related configurations from appearing in different subsets.
+
+MatPES stresses are stored using 6-dimensional Voigt notation:
+
+```text
+[xx, yy, zz, yz, xz, xy]
+```
+
+They were converted into full \(3 \times 3\) stress tensors before training.
+
+---
+
+## Preliminary Results
+
+A grouped MatPES-PBE-2025.2 subset containing **5,000 structures** was used.
+
+| Model | Energy MAE (eV/atom) | Force MAE (eV/Å) | Stress MAE (GPa) | Total Loss |
+|---|---:|---:|---:|---:|
+| Transformer atomic-sum M3GNet | 0.1842 | 0.2853 | **1.5402** | 0.2612 |
+| Original M3GNet | **0.1603** | **0.2843** | 1.5678 | **0.2548** |
+
+### Initial observations
+
+- The Transformer atomic-sum model produced force accuracy similar to the original M3GNet.
+- It achieved slightly lower stress MAE.
+- The original M3GNet achieved better energy MAE and total loss.
+- The Transformer model did not outperform the original M3GNet overall in this preliminary experiment.
+
+The atomic-sum Transformer readout is nevertheless more appropriate for variable-size PES datasets than the previous max-pooling Transformer readout, because the final energy is obtained through atomic summation.
+
+These results should currently be interpreted as a proof-of-concept rather than a final model comparison.
+
+---
+
+## Limitations
+
+- Global self-attention has quadratic complexity with respect to the number of atoms:
+
+  \[
+  O(N^2)
+  \]
+
+- Attention is applied globally within each crystal rather than being restricted to graph neighbors.
+- Atomic summation restores an extensive output form, but global attention does not strictly guarantee size consistency for completely disconnected systems.
+- No explicit positional or structural encoding is currently added to the Transformer.
+- The current results are based on a relatively small dataset subset.
+- Only a limited set of Transformer hyperparameters has been tested.
+- The Transformer and baseline models may require further parameter-matched and seed-controlled comparisons.
+
+---
+
+## Future Work
+
+Planned directions include:
+
+1. training on larger MatPES subsets;
+2. repeating experiments with multiple random seeds;
+3. performing systematic Transformer hyperparameter searches;
+4. comparing models with more closely matched parameter counts;
+5. investigating local or geometry-aware attention;
+6. adding relative distance or structural information to the attention mechanism;
+7. exploring attention inside M3GNet node updates or three-body interactions;
+8. evaluating size consistency on disconnected or replicated structures.
+
+---
+
+## Branches
+
+### `transformer-readout-m3gnet`
+
+Earlier implementation using:
+
+```text
+TransformerEncoder
+    ↓
+Masked max pooling
+    ↓
+Graph-level energy
+```
+
+### `transformer-atomic-sum-readout`
+
+Current implementation using:
+
+```text
+TransformerEncoder
+    ↓
+Per-atom energy prediction
+    ↓
+Atomic energy summation
+    ↓
+Total energy
+```
+
+---
+
+## Research Status
+
+This repository contains experimental research code.
+
+The implementation and results are preliminary and should not yet be treated as a production-ready interatomic potential or as evidence that the Transformer architecture improves M3GNet accuracy in general.
