@@ -837,37 +837,9 @@ The atomic-sum Transformer readout is nevertheless more appropriate for variable
 
 These results should currently be interpreted as a proof-of-concept rather than a final model comparison.
 
----
 
-## Limitations
 
-- Global self-attention has quadratic complexity with respect to the number of atoms:
 
-  \[
-  O(N^2)
-  \]
-
-- Attention is applied globally within each crystal rather than being restricted to graph neighbors.
-- Atomic summation restores an extensive output form, but global attention does not strictly guarantee size consistency for completely disconnected systems.
-- No explicit positional or structural encoding is currently added to the Transformer.
-- The current results are based on a relatively small dataset subset.
-- Only a limited set of Transformer hyperparameters has been tested.
-- The Transformer and baseline models may require further parameter-matched and seed-controlled comparisons.
-
----
-
-## Future Work
-
-Planned directions include:
-
-1. training on larger MatPES subsets;
-2. repeating experiments with multiple random seeds;
-3. performing systematic Transformer hyperparameter searches;
-4. comparing models with more closely matched parameter counts;
-5. investigating local or geometry-aware attention;
-6. adding relative distance or structural information to the attention mechanism;
-7. exploring attention inside M3GNet node updates or three-body interactions;
-8. evaluating size consistency on disconnected or replicated structures.
 
 ---
 
