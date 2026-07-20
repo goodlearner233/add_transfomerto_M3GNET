@@ -89,7 +89,7 @@ from matgl.layers import (
     SphericalBesselWithHarmonics,#对应公式2，把三体几何距离+角度变成三体特征向量
     ThreeBodyInteractions,#三体信息聚合回边e_ij
 )
-from matgl.layers._readout_torch import ReduceReadOut, TransformerReadOut, WeightedAtomReadOut, WeightedReadOut  # Reduce/Weighted readout，用于普通性质或势能分支
+from matgl.layers._readout_torch import ReduceReadOut, TransformerAtomicReadOut, WeightedAtomReadOut, WeightedReadOut  # Reduce/Weighted readout，用于普通性质或势能分支
 from matgl.utils.cutoff import polynomial_cutoff  # 三体 cutoff，让远距离三体作用平滑衰减到 0
 
 from ._core import MatGLModel, _warn_feature_dict_kwarg
@@ -229,38 +229,36 @@ class M3GNet(MatGLModel):
                     in_feats=input_feats, dims=[units, units], activation=activation
                 )
                 readout_feats = units + dim_state_feats_used if include_state else units
-            elif readout_type == "transformer":#新加的transformer readout 分支，参考 DiepFormer 论文
-                if field != "node_feat":
-                    raise NotImplementedError("Transformer readout only supports node features.")
-                if include_state:
-                    raise NotImplementedError("Transformer readout with state features is not implemented.")
-                # self.final_layer = TransformerReadOut(
-                #     in_feats=input_feats,
-                #     num_targets=ntargets,
-                self.final_layer = TransformerReadOut(#使用定义的超参数，不然就要用readout 文件中定义的默认值了
-                    in_feats=input_feats,
-                    num_targets=ntargets,
-                    nhead = transformer_nhead,
-                    num_layers = transformer_num_layers,
-                    dim_ff = transformer_dim_ff,
-                    dropout = transformer_dropout,
-                ) 
+            elif readout_type == "transformer":#新加的transformer readout 分支，参考 DiepFormer 论文,但是在此处intensive默认为不可用
+                raise ValueError( "Transformer atomic-energy readout requires is_intensive=False."
+                )
             else:
                 self.readout = ReduceReadOut("mean", field=field)  # type: ignore[assignment] #这里是最简单的readout，求所有节点/边特征求平均
                 readout_feats = input_feats + dim_state_feats_used if include_state else input_feats
-            if readout_type != "transformer":#transformer readout 分支不需要 MLP，直接输出 graph vector
-                dims_final_layer = [readout_feats, units, units, ntargets]  # 最终 MLP 的维度：graph vector -> 输出
-                self.final_layer = MLP(dims_final_layer, activation, activate_last=False)  # 普通性质预测的输出 MLP
+
+            dims_final_layer = [readout_feats, units, units, ntargets]  # 最终 MLP 的维度：graph vector -> 输出
+            self.final_layer = MLP(dims_final_layer, activation, activate_last=False)  # 普通性质预测的输出 MLP
             if task_type == "classification":
                 self.sigmoid = nn.Sigmoid()  # 分类任务最后接 sigmoid
         else:#如果是 extensive 能量预测分支，输出随原子数简单相加
             if task_type == "classification":#在此情况下，分类任务不适用，因为 extensive 能量预测是回归问题
                 raise ValueError("Classification task cannot be extensive.")
-            self.final_layer = WeightedReadOut(  # type: ignore[assignment]
-                in_feats=dim_node_embedding,
-                dims=[units, units],
-                num_targets=ntargets,
-            )
+            if readout_type == "transformer":
+                self.final_layer = TransformerAtomicReadOut(
+                    in_feats = dim_node_embedding,
+                    num_targets = ntargets,
+                    nhead = transformer_nhead,
+                    num_layers = transformer_num_layers,
+                    dim_ff = transformer_dim_ff,
+                    dropout = transformer_dropout,
+                    atomic_hidden_dims = (units, units),
+                )
+            else:
+                self.final_layer = WeightedReadOut(  # type: ignore[assignment]
+                    in_feats=dim_node_embedding,
+                    dims=[units, units],
+                    num_targets=ntargets,
+                )
 
         self.max_n = max_n
         self.max_l = max_l
@@ -378,24 +376,26 @@ class M3GNet(MatGLModel):
                 "state_feat": state_feat,
             }
 
-        if self.is_intensive: #readout输出分两种情况,这里加入了transfomer分支
-            if self.readout_type == "transformer":
-                output = self.final_layer(node_feat, batch)
-                fea_dict["readout"] = output
-        
+        if self.is_intensive:  # 如果 readout 走 intensive 性质预测分支，输出不随原子数简单相加
+            field_vec = self._readout(node_feat, edge_feat, batch)  # 根据 field 聚合 node/edge 特征，得到 graph-level vector
+
+            if self.include_state and state_feat is not None:
+                state_view = state_feat.view(num_graphs, -1)  # state_feat 可能是 (num_graphs, dim_state) 或 (dim_state,) 需要 reshape
+                readout_vec = torch.hstack([field_vec, state_view])  # 把 graph-level vector 和 state 拼接
             else:
-                field_vec = self._readout(node_feat, edge_feat, batch)  # 普通性质分支：把 node/edge 特征聚合成 graph vector
-                if self.include_state and state_feat is not None:
-                    state_view = state_feat.view(num_graphs, -1)  # 把 state_feat 整理成每个 graph 一行
-                    readout_vec = torch.hstack([field_vec, state_view])  # 如果使用 state，就把 graph vector 和 state 拼接
-                else:
-                    readout_vec = field_vec
-                fea_dict["readout"] = readout_vec
-                output = self.final_layer(readout_vec)  # 普通性质分支：graph vector 经过 MLP 得到输出
+                readout_vec = field_vec
+
+            fea_dict["readout"] = readout_vec
+            output = self.final_layer(readout_vec)  # 最终 MLP 输出预测结果
+
             if self.task_type == "classification":
-                output = self.sigmoid(output)
+                output = self.sigmoid(output)  # 分类任务最后接 sigmoid
         else:#如果readout走 extensive 能量预测分支，输出随原子数简单相加
-            atomic = self.final_layer(node_feat)  # (num_nodes, ntargets)
+            if self.readout_type == "transformer":
+                #Transformer 需要 batch，以保证每个结构只在自己的原子之间做 attention
+                atomic = self.final_layer(node_feat, batch) #这里的final layer是前面初始化的，根据输入readout_type不同而不同
+            else:
+                atomic = self.final_layer(node_feat)  # 原本M3GNET，逐原子GATED MLP不需要batch
             fea_dict["readout"] = atomic
             atomic = atomic.view(-1)
             if batch is None:

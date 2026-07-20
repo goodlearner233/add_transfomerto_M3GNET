@@ -167,8 +167,8 @@ class WeightedReadOut(nn.Module):
     def forward(self, node_feat: torch.Tensor) -> torch.Tensor:
         return self.gated(node_feat)
 
-class TransformerReadOut(nn.Module):  # 定义 transformer readout 类
-    """DiepFormer-style Transformer readout for PyG node features."""
+class TransformerAtomicReadOut(nn.Module):  # 定义 transformer readout 类
+    """Transformer encoder with a gated per-atom energy head."""
 
     def __init__(
         self,
@@ -178,6 +178,7 @@ class TransformerReadOut(nn.Module):  # 定义 transformer readout 类
         num_layers: int = 3,  # TransformerEncoder 堆几层
         dim_ff: int = 256,  # 内部 FFN/MLP 的隐藏维度
         dropout: float = 0.1,  # dropout 比例
+        atomic_hidden_dims: tuple[int, ...] = (64, 64),
     ):
         super().__init__()
 
@@ -196,8 +197,13 @@ class TransformerReadOut(nn.Module):  # 定义 transformer readout 类
             num_layers=num_layers,
             enable_nested_tensor=False,
         )
-        self.out_layer = nn.Linear(in_feats, num_targets)  #transformer最后得到一个结构级别的向量 ，但最终要输出目标
-        
+        #这里我改成了一个 GatedMLP 作为 readout 层，输入是每个原子的向量，输出是每个原子对应的目标值
+        self.atomic_head = WeightedReadOut(
+            in_feats=in_feats,
+            dims=atomic_hidden_dims,
+            num_targets=num_targets,
+        )
+
     def forward(self, node_feat: torch.Tensor, batch: torch.Tensor | None = None) -> torch.Tensor:
         # """定义 forward 函数：
         # 输入:node_feat 是 torch.Tensorbatch 是 torch.Tensor 或 None，默认是 None
@@ -214,8 +220,8 @@ class TransformerReadOut(nn.Module):  # 定义 transformer readout 类
             src_key_padding_mask=~mask,  # Transformer 的 padding mask 是 True 表示 padding，False 表示有效原子，所以要取反
         )
         #  """Tranout的结构是 [batch_size, max_atoms, hidden_dim]，每个原子都经过了 Transformer 编码，一个向量"""
-        # """但预测需要一个结构一个向量，所以需要对每个结构的原子向量做池化，得到一个结构向量"""
-        trans_out = trans_out.masked_fill(~mask.unsqueeze(-1), -1e9)#凡是 padding 假节点的位置，都填成 -1e9
-        graph_repr = trans_out.max(dim=1).values  # masked max pooling：对原子维度取最大值，每个特征维度分别取 max，得到结构向量
+        # # 去掉padding后，对每个真实原子分别预测atomic energy
+        updated_node_feat = trans_out[mask]#只取真实原子的Transformer输出，去掉padding节点
+        atomic_energies = self.atomic_head(updated_node_feat) # 每个真实原子通过GatedMLP得到一个原子能量贡献，每一行是一个原子的标量能量贡献
 
-        return self.out_layer(graph_repr)  # 最后通过一个线性层输出目标
+        return atomic_energies
