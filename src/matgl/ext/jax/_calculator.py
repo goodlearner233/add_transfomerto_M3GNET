@@ -1,0 +1,139 @@
+"""ASE calculator backed by the JAX TensorNet/QET inference path.
+
+``JAXPESCalculator`` is a near drop-in twin of ``matgl.ext.ase.PESCalculator``:
+it reuses matgl's existing (numpy/CPU) neighbour-list build, pads the edge list
+to a bucket capacity for shape-stable XLA compilation, and evaluates a single
+jitted ``(E, forces, stress)`` function (plus QEq charges for charge-predicting
+potentials). It plugs straight into matgl's ``MolecularDynamics`` / ``Relaxer``.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+
+import jax.numpy as jnp
+import numpy as np
+from ase import units
+from ase.calculators.calculator import Calculator, all_changes
+from ase.stress import full_3x3_to_voigt_6_stress
+
+from matgl.ext.ase import Atoms2Graph
+
+from ._convert import convert_potential
+from ._pad import next_bucket, pad_graph
+from ._potential import make_potential_fn
+
+logger = logging.getLogger(__name__)
+
+
+class JAXPESCalculator(Calculator):
+    """ASE calculator that runs a converted matgl ``Potential`` under JAX/XLA."""
+
+    implemented_properties = ("energy", "free_energy", "forces", "stress", "charges")
+
+    def __init__(
+        self,
+        potential,
+        *,
+        stress_unit: str = "GPa",
+        stress_weight: float = 1.0,
+        use_voigt: bool = False,
+        dtype: str = "float32",
+        pad_edges: bool = True,
+        total_charge: float | None = None,
+        **kwargs,
+    ):
+        """Initialize from a (converted-on-the-fly) matgl ``Potential``.
+
+        Args:
+            potential: a ``matgl.apps.pes.Potential`` wrapping TensorNet / QET.
+            stress_unit: ``"GPa"`` or ``"eV/A3"`` (use the latter for ASE MD/relax).
+            stress_weight: extra multiplier applied to the stress.
+            use_voigt: emit stress as a Voigt 6-vector instead of a 3x3 matrix.
+            dtype: ``"float32"`` (default) or ``"float64"``.
+            pad_edges: pad the edge list to a bucket capacity so the jitted
+                program is shape-stable across MD steps.
+            total_charge: total charge of the structure, consumed only by charge-predicting
+                potentials (calc_charge=True). If None, the sum of atoms.get_initial_charges()
+                is used.
+            **kwargs: forwarded to ``ase.calculators.calculator.Calculator``.
+        """
+        super().__init__(**kwargs)
+        params, cfg, extras = convert_potential(potential)
+        self.compute_charge = bool(getattr(potential, "calc_charge", False))
+        self.total_charge = total_charge
+        self._fn = make_potential_fn(params, cfg, extras, num_graphs=1, with_charges=self.compute_charge)
+        self.element_types = tuple(potential.model.element_types)
+        self.cutoff = float(potential.model.cutoff)
+        self._a2g = Atoms2Graph(self.element_types, self.cutoff)
+        self._pad_edges = pad_edges
+        self._dtype = jnp.float64 if dtype == "float64" else jnp.float32
+
+        if stress_unit == "eV/A3":
+            cf = units.GPa / (units.eV / units.Angstrom**3)
+        elif stress_unit == "GPa":
+            cf = 1.0
+        else:
+            raise ValueError(f"stress_unit must be 'GPa' or 'eV/A3', got {stress_unit!r}")
+        self.conversion_factor = cf * stress_weight
+        if self.conversion_factor == 1.0:
+            logger.warning(
+                "The stress unit is now in GPa. Please set stress_unit='eV/A3' "
+                "if you want to use JAXPESCalculator for other ASE applications."
+            )
+        elif math.isclose(
+            self.conversion_factor, units.GPa / (units.eV / units.Angstrom**3), rel_tol=1e-4, abs_tol=1e-6
+        ):
+            logger.info("The stress unit is now in eV/A^3, which is the correct unit for an ASE Calculator.")
+        else:
+            raise ValueError(
+                "Error: Invalid stress unit configuration: stress_weight corresponds to neither "
+                "GPa nor eV/A^3. This is likely caused by setting both stress_unit and "
+                "stress_weight. Please set stress_unit to 'GPa' or 'eV/A3' and "
+                "stress_weight to 1.0."
+            )
+        self.use_voigt = use_voigt
+
+    def calculate(self, atoms=None, properties=None, system_changes=all_changes):
+        """Build the graph, run the jitted JAX potential, store ASE results."""
+        properties = properties or ["energy"]
+        super().calculate(atoms=atoms, properties=properties, system_changes=system_changes)
+
+        g, lat, _ = self._a2g.get_graph(atoms)
+        dt = self._dtype
+        lat3 = jnp.asarray(np.asarray(lat[0]), dtype=dt)
+        frac = jnp.asarray(g.frac_coords.numpy(), dtype=dt)
+        pos = frac @ lat3
+        pbc_offset = jnp.asarray(g.pbc_offset.numpy(), dtype=dt)
+        z = jnp.asarray(g.node_type.numpy(), dtype=jnp.int32)
+        edge_index = jnp.asarray(g.edge_index.numpy(), dtype=jnp.int32)
+        n_atoms = z.shape[0]
+        n_edges = edge_index.shape[1]
+        batch = jnp.zeros(n_atoms, dtype=jnp.int32)
+        strain = jnp.zeros((3, 3), dtype=dt)
+
+        if self._pad_edges:
+            edge_index, pbc_offset, edge_mask = pad_graph(edge_index, pbc_offset, next_bucket(n_edges))
+        else:
+            edge_mask = jnp.ones(n_edges, dtype=dt)
+
+        charges = None
+        if self.compute_charge:
+            total_charge = (
+                float(self.total_charge) if self.total_charge is not None else atoms.get_initial_charges().sum()
+            )
+            e, f, s, charges = self._fn(
+                pos, strain, frac, lat3, pbc_offset, z, edge_index, batch, edge_mask, jnp.asarray(total_charge, dt)
+            )
+        else:
+            e, f, s = self._fn(pos, strain, frac, lat3, pbc_offset, z, edge_index, batch, edge_mask)
+
+        energy = float(np.asarray(e).reshape(-1)[0])
+        self.results.update(energy=energy, free_energy=energy, forces=np.asarray(f, dtype=np.float64))
+        stress = np.asarray(s, dtype=np.float64)
+        if self.use_voigt:
+            stress = full_3x3_to_voigt_6_stress(stress)
+        self.results.update(stress=stress * self.conversion_factor)
+        if charges is not None:
+            self.results.update(charges=np.asarray(charges, dtype=np.float64))

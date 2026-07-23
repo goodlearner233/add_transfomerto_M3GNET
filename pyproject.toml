@@ -1,0 +1,266 @@
+[build-system]
+requires = [
+    # pin NumPy version used in the build
+    "oldest-supported-numpy",
+    "setuptools>=58.0.3",
+]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "matgl"
+authors = [
+    { name = "Tsz Wai Ko", email = "t1ko@ucsd.edu" },
+    { name = "Marcel Nassar", email = "marcel.nassar@intel.com" },
+    { name = "Ji Qi", email = "j1qi@ucsd.edu" },
+    { name = "Santiago Miret", email = "santiago.miret@intel.com" },
+    { name = "Eliott Liu", email = "elliottliu17@gmail.com" },
+    { name = "Bowen Deng", email = "bowendeng@berkeley.edu" },
+    { name = "Luis Barroso-Luque", email = "lbluque@berkeley.edu" },
+    { name = "Shyue Ping Ong", email = "shyue@nus.edu.sg" },
+]
+description = "MatGL is a framework for graph deep learning for materials science."
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = [
+    "materials",
+    "interatomic potential",
+    "force field",
+    "science",
+    "property prediction",
+    "AI",
+    "machine learning",
+    "graph",
+    "deep learning",
+]
+license = { text = "BSD-3-Clause" }
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "ase",
+    "torch",
+    "torchdata",
+    "lightning<=2.6.1",
+    "pydantic",
+    "boto3",
+    "numpy",
+    "torch-geometric",
+    "pymatgen-core>=2026.5.18",
+    "huggingface_hub>=0.24",
+]
+version = "4.0.2"
+
+[project.scripts]
+mgl = "matgl.cli:main"
+
+[project.optional-dependencies]
+ops = [
+  "nvalchemi-toolkit-ops",
+]
+alchmtk = [
+  "nvalchemi-toolkit",
+]
+jax = [
+  "jax>=0.4.30",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["matgl", "matgl.*"]
+
+[tool.setuptools.package-data]
+matgl = ["py.typed"]
+"matgl.utils" = ["sb_roots.npy"]
+
+
+[tool.black]
+line-length = 120
+target-version = ['py312']
+include = '\.pyi?$'
+exclude = '''
+(
+  /(
+      \.eggs         # exclude a few common directories in the
+    | \.git          # root of the project
+    | \.hg
+    | \.mypy_cache
+    | \.tox
+    | \.venv
+    | _build
+    | buck-out
+    | build
+    | dist
+    | test_files
+  )/
+)
+'''
+
+[tool.ruff]
+line-length = 120
+lint.select = [
+    "B", # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "D", # pydocstyle
+    "E", # pycodestyle error
+    "EXE", # flake8-executable
+    "F", # pyflakes
+    "I", # isort
+    "ICN", # flake8-import-conventions
+    "ISC", # flake8-implicit-str-concat
+    "PD", # pandas-vet
+    "PERF", # perflint
+    "PIE", # flake8-pie
+    "PL", # pylint
+    "PT", # flake8-pytest-style
+    "PYI", # flakes8-pyi
+    "Q", # flake8-quotes
+    "RET", # flake8-return
+    "RSE", # flake8-raise
+    "RUF", # Ruff-specific rules
+    "SIM", # flake8-simplify
+    "SLOT", # flake8-slots
+    "TCH", # flake8-type-checking
+    "TID", # tidy imports
+    "TID", # flake8-tidy-imports
+    "UP", # pyupgrade
+    "W", # pycodestyle warning
+    "YTT", # flake8-2020
+]
+lint.ignore = [
+    # Layer modules use ``lru_cache`` to memoize symbolic basis function generation;
+    # they are constructed once and live for the program's lifetime, so the
+    # method-level cache cannot leak in practice.
+    "B019",
+    # Lazy imports are used throughout to avoid forcing optional deps
+    # (scipy, full ``pymatgen``, ``nvalchemiops``) at import time.
+    "PLC0415",
+    # Pylint refactor rules — ML model ``__init__``/``forward`` methods inherently
+    # have many hyperparameters/branches/statements; magic values like
+    # ``dim() == 3`` (3D check) or ``el.Z < 95`` (atomic number cutoff) are
+    # clearer than named constants.
+    "PLR0912",  # too-many-branches
+    "PLR0913",  # too-many-arguments
+    "PLR0915",  # too-many-statements
+    "PLR2004",  # magic-value-comparison
+]
+lint.pydocstyle.convention = "google"
+lint.isort.required-imports = ["from __future__ import annotations"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/**/*" = ["D", "PERF"]
+"docs/**/*" = ["D"]
+"examples/**/*" = ["D"]
+"scripts/**/*" = ["D", "PERF"]
+# Warp parses kernel function annotations at decoration time to compile to GPU
+# code, so ``from __future__ import annotations`` (I002) cannot be used. Tensor
+# decomposition components ``I``, ``A``, ``S`` (E741) follow physics conventions
+# and should not be renamed.
+"src/matgl/kernels/*" = ["E741", "I002"]
+# GRACE / ACE machinery uses ``l`` as the canonical angular-momentum index
+# throughout (matches the physics literature and the upstream gracemaker
+# implementation). Renaming would obscure the math.
+"src/matgl/layers/_grace.py" = ["E741"]
+"src/matgl/models/_grace.py" = ["E741"]
+"tests/models/test_grace_parity_tp.py" = ["E741"]
+
+[tool.pytest.ini_options]
+addopts = "--durations=30 --quiet -rXs --color=yes -p no:warnings"
+
+[tool.mypy]
+ignore_missing_imports = true
+no_implicit_optional = false
+# ``dev`` holds local development scripts (refactor helpers, validators,
+# ad-hoc reproducers). Not part of the installed package, so we don't
+# typecheck it alongside ``src/matgl``. mypy v2 walks more files by
+# default than v1.20, which is why this exclusion is needed now.
+exclude = ['examples', 'tests', 'dev']
+
+[[tool.mypy.overrides]]
+module = ["requests.*", "tabulate.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["matgl.kernels.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["matgl.ext.jax.*"]
+ignore_errors = true
+
+[tool.coverage.run]
+relative_files = true
+omit = [
+    # GPU-only NVIDIA Warp kernels — require CUDA hardware and the `warp` runtime.
+    # Not exercised in CI; the pure-PyTorch reference ops in matgl.ops are tested instead.
+    "src/matgl/kernels/*",
+    # NVIDIA nvalchemi-toolkit interface — requires the proprietary nvalchemiops
+    # package and CUDA hardware; not available in CI.
+    "src/matgl/ext/alchmtk.py",
+    "src/matgl/ext/_alchmtk.py",
+    "src/matgl/ext/_tensornet_alchmtk.py",
+    # Optional JAX inference backend — only exercised in the dedicated `jax` CI job.
+    "src/matgl/ext/jax/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "@deprecated",
+    "def __repr__",
+    "except PackageNotFoundError:",
+    "if 0:",
+    "if TYPE_CHECKING:",
+    "if typing.TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "input",
+    "logging.basicConfig",
+    "pragma: no cover",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "raise RuntimeError",
+]
+
+[dependency-groups]
+dev = [
+    "coverage>=7.7.1",
+    "docutils>=0.21.2",
+    "invoke>=2.2.0",
+    "jupyter>=1.1.1",
+    "myst-parser>=4.0.1",
+    "pre-commit>=4.2.0",
+    "pytest>=8.3.5",
+    "pytest-cov>=6.0.0",
+    "requests>=2.32.3",
+    "sphinx>=8.1.3",
+    "sphinx-markdown-builder>=0.6.8",
+]
+lint = [
+    "mypy>=1.18.0",
+    "ruff>=0.11.2",
+]
+
+[tool.uv.sources]
+# PyPI's default `torch` wheel bundles CUDA 13, which requires a newer NVIDIA
+# driver than this cluster's GPU nodes ship (driver reports CUDA 12.7 max,
+# see gpu.err: "CUDA initialization: The NVIDIA driver on your system is too
+# old (found version 12070)"). Pin Linux installs to the CUDA 12.6 build
+# instead; other platforms (e.g. macOS) keep resolving from the default index.
+torch = [
+    { index = "pytorch-cu126", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
