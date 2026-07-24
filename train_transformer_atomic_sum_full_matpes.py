@@ -101,14 +101,24 @@ Checkpoints and Outputs
 -----------------------
 The script saves:
 
-    best.ckpt
+    best-epoch=...-step=....ckpt
         Checkpoint with the lowest validation total loss.
 
     last.ckpt
         Checkpoint from the final training epoch.
 
+    epoch-...-step-....ckpt
+        One full checkpoint after every completed epoch. These files retain
+        model, optimizer, scheduler, epoch, and global-step state for diagnosis
+        and exact training resumption.
+
     metrics.csv
         Per-epoch training and validation metrics.
+
+    tensorboard/version_.../events.out.tfevents...
+        TensorBoard event files containing the same training, validation, and
+        learning-rate metrics. Start TensorBoard separately and point
+        ``--logdir`` at the ``tensorboard`` directory.
 
     run_config.json
         Dataset path, model parameters, and training configuration.
@@ -179,7 +189,7 @@ import numpy as np
 import torch
 from ase.stress import voigt_6_to_full_3x3_stress
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger
+from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
@@ -357,15 +367,26 @@ def main() -> None:
         lr=1e-3,
     )
 
-    checkpoint = ModelCheckpoint(
+    best_checkpoint = ModelCheckpoint(
         dirpath=args.output_dir / "checkpoints",
         filename="best-{epoch:03d}-{step}",
         monitor="val_Total_Loss",
         mode="min",
         save_top_k=1,
+        save_last=False,
+    )
+    epoch_checkpoint = ModelCheckpoint(
+        dirpath=args.output_dir / "checkpoints",
+        filename="epoch-{epoch:03d}-step-{step}",
+        auto_insert_metric_name=False,
+        save_top_k=-1,
+        every_n_epochs=1,
+        save_on_train_epoch_end=False,
+        save_weights_only=False,
         save_last=True,
     )
-    logger = CSVLogger(save_dir=args.output_dir, name="logs")
+    csv_logger = CSVLogger(save_dir=args.output_dir, name="logs")
+    tensorboard_logger = TensorBoardLogger(save_dir=args.output_dir, name="tensorboard")
 
     trainer_kwargs: dict[str, Any] = {
         "max_epochs": args.max_epochs,
@@ -373,8 +394,12 @@ def main() -> None:
         "devices": args.devices,
         "precision": "32-true",
         "inference_mode": False,
-        "logger": logger,
-        "callbacks": [checkpoint, LearningRateMonitor(logging_interval="epoch")],
+        "logger": [csv_logger, tensorboard_logger],
+        "callbacks": [
+            best_checkpoint,
+            epoch_checkpoint,
+            LearningRateMonitor(logging_interval="epoch"),
+        ],
         "num_sanity_val_steps": 0,
         "log_every_n_steps": 100,
         "gradient_clip_val": 2.0,
@@ -409,13 +434,13 @@ def main() -> None:
         test_results = trainer.test(
             model=lit_module,
             dataloaders=test_loader,
-            ckpt_path=checkpoint.best_model_path,
+            ckpt_path=best_checkpoint.best_model_path,
         )[0]
 
     elapsed_minutes = (time.perf_counter() - training_start) / 60
     result = {
-        "best_checkpoint": checkpoint.best_model_path,
-        "best_val_total_loss": checkpoint.best_model_score,
+        "best_checkpoint": best_checkpoint.best_model_path,
+        "best_val_total_loss": best_checkpoint.best_model_score,
         "training_and_test_minutes": elapsed_minutes,
         "test": test_results,
     }
@@ -424,8 +449,8 @@ def main() -> None:
     )
 
     print("Training and testing complete.")
-    print("Best checkpoint:", checkpoint.best_model_path)
-    print("Best validation loss:", checkpoint.best_model_score)
+    print("Best checkpoint:", best_checkpoint.best_model_path)
+    print("Best validation loss:", best_checkpoint.best_model_score)
     print("Elapsed minutes:", elapsed_minutes)
     print("Test results:", test_results)
 
