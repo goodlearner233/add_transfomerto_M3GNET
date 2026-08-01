@@ -1,6 +1,6 @@
 
 """
-Full-dataset training script for Transformer Atomic-Sum M3GNet.
+Full-dataset training script for Transformer Linear Atomic-Sum M3GNet.
 
 Overview
 --------
@@ -17,7 +17,7 @@ The model follows this pipeline:
         -> M3GNet graph-convolution blocks
         -> final atomic node features
         -> Transformer encoder
-        -> gated atomic-energy prediction head
+        -> linear atomic-energy prediction head
         -> sum atomic energies within each graph
         -> total energy
 
@@ -25,7 +25,7 @@ In mathematical form:
 
     H = M3GNet(structure)
     H' = TransformerEncoder(H)
-    E_i = GatedMLP(h'_i)
+    E_i = Linear(h'_i)
     E_total = sum_i E_i
 
 Unlike the earlier Transformer max-pooling implementation, this atomic-sum
@@ -58,7 +58,7 @@ Default Model Configuration
     Transformer encoder layers  = 1
     Transformer FFN dimension   = 128
     Transformer dropout         = 0.0
-    readout                      = atomic-energy sum
+    readout                      = linear atomic-energy sum
     output targets               = 1
 
 Training Configuration
@@ -213,13 +213,13 @@ def parse_devices(value: str) -> int | str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train Transformer atomic-sum M3GNet on the full MatPES dataset."
+        description="Train Transformer linear atomic-sum M3GNet on the full MatPES dataset."
     )
     parser.add_argument("--data", type=Path, required=True, help="Path to the complete MatPES JSON file.")
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("runs/transformer_atomic_sum_full_matpes"),
+        default=Path("runs/transformer_linear_atomic_sum_full_matpes"),
         help="Directory for graph cache, CSV logs, checkpoints, and test results.",
     )
     parser.add_argument(
@@ -356,6 +356,7 @@ def main() -> None:
 
     print("Model:", type(model).__name__)
     print("Final layer:", type(model.final_layer).__name__)
+    print("Atomic head:", type(model.final_layer.atomic_head).__name__)
     print("Trainable parameters:", sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad))
 
     lit_module = PotentialLightningModule(
@@ -418,6 +419,7 @@ def main() -> None:
     config["model_parameters"] = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
     )
+    config["atomic_head"] = type(model.final_layer.atomic_head).__name__
     (args.output_dir / "run_config.json").write_text(
         json.dumps(json_ready(config), indent=2), encoding="utf-8"
     )

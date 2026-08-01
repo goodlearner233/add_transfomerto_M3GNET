@@ -251,7 +251,6 @@ class M3GNet(MatGLModel):
                     num_layers = transformer_num_layers,
                     dim_ff = transformer_dim_ff,
                     dropout = transformer_dropout,
-                    atomic_hidden_dims = (units, units),
                 )
             else:
                 self.final_layer = WeightedReadOut(  # type: ignore[assignment]

@@ -13,7 +13,12 @@ import pytest
 import torch
 from torch import nn
 
-from matgl.layers._readout_torch import ReduceReadOut, WeightedAtomReadOut, WeightedReadOut
+from matgl.layers._readout_torch import (
+    ReduceReadOut,
+    TransformerAtomicReadOut,
+    WeightedAtomReadOut,
+    WeightedReadOut,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -89,6 +94,26 @@ def test_weighted_readout_numbers():
     ]
 
     _assert_close_to_expected(out, expected_values)
+
+
+def test_transformer_atomic_readout_uses_linear_head():
+    """The linear ablation returns one scalar contribution per real atom."""
+    readout = TransformerAtomicReadOut(
+        in_feats=8,
+        num_targets=1,
+        nhead=2,
+        num_layers=1,
+        dim_ff=16,
+        dropout=0.0,
+    )
+    node_feat = torch.randn(5, 8)
+    batch = torch.tensor([0, 0, 1, 1, 1])
+
+    output = readout(node_feat, batch)
+
+    assert isinstance(readout.atomic_head, nn.Linear)
+    assert output.shape == (5, 1)
+    assert torch.isfinite(output).all()
 
 
 # ---------------------------------------------------------------------------
