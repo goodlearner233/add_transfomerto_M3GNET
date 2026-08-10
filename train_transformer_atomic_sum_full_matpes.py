@@ -233,6 +233,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--accumulate-grad-batches",
+        type=int,
+        default=1,
+        help="Number of batches accumulated before each optimizer step.",
+    )
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument(
         "--accelerator",
@@ -402,7 +408,9 @@ def main() -> None:
             LearningRateMonitor(logging_interval="epoch"),
         ],
         "num_sanity_val_steps": 0,
-        "log_every_n_steps": 100,
+        "log_every_n_steps": 1000,
+        "enable_progress_bar": False,
+        "accumulate_grad_batches": args.accumulate_grad_batches,
         "gradient_clip_val": 2.0,
     }
     if isinstance(args.devices, int) and args.devices > 1:
