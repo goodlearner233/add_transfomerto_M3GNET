@@ -14,6 +14,7 @@ import torch
 from torch import nn
 
 from matgl.layers._readout_torch import (
+    LinearAtomicReadOut,
     ReduceReadOut,
     TransformerAtomicReadOut,
     WeightedAtomReadOut,
@@ -30,6 +31,18 @@ def _assert_close_to_expected(output: torch.Tensor, expected_values, *, rtol=1e-
     assert output.shape == expected.shape
     assert torch.isfinite(output).all()
     assert torch.allclose(output, expected, rtol=rtol, atol=atol)
+
+
+def test_linear_atomic_readout_matches_its_atomic_head():
+    """LinearAtomicReadOut applies one shared linear map independently to every atom."""
+    torch.manual_seed(42)
+    node_feat = torch.randn(6, 4)
+    readout = LinearAtomicReadOut(in_feats=4, num_targets=1)
+
+    output = readout(node_feat)
+
+    assert output.shape == (6, 1)
+    assert torch.allclose(output, readout.atomic_head(node_feat))
 
 
 # ---------------------------------------------------------------------------

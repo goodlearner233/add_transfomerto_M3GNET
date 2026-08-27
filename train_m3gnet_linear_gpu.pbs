@@ -1,0 +1,53 @@
+#!/bin/bash
+
+#PBS -P xq82
+#PBS -q gpuhopper
+#PBS -N m3gnet_linear_baseline
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=256GB
+#PBS -l jobfs=20GB
+#PBS -l walltime=48:00:00
+#PBS -l storage=scratch/xq82
+#PBS -l wd
+#PBS -j oe
+
+set -euo pipefail
+
+source /scratch/xq82/bd1444/diepformer_dgl_work/miniforge3/etc/profile.d/conda.sh
+conda activate /scratch/xq82/bd1444/matglformer_linear_work/envs/matgl-linear
+
+export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
+export OMP_NUM_THREADS=1
+
+DATA_PATH=/scratch/xq82/bd1444/matglformer_linear_work/data/MatPES-PBE-2025.2.json
+GRAPH_CACHE=/scratch/xq82/bd1444/matglformer_linear_work/runs/linear_atomic_sum_full_pbe/graph_cache
+OUTPUT_DIR="$PWD/runs/m3gnet_linear_atomic_sum_bs32_acc4_200ep"
+TARGET_EPOCHS="${TARGET_EPOCHS:-200}"
+
+mkdir -p "$OUTPUT_DIR"
+
+ARGS=(
+  --data "$DATA_PATH"
+  --graph-cache-dir "$GRAPH_CACHE"
+  --output-dir "$OUTPUT_DIR"
+  --max-epochs "$TARGET_EPOCHS"
+  --batch-size 32
+  --accumulate-grad-batches 4
+  --num-workers 8
+  --accelerator gpu
+  --devices 1
+  --seed 42
+)
+
+if [[ -f "$OUTPUT_DIR/checkpoints/last.ckpt" ]]; then
+  ARGS+=(--resume "$OUTPUT_DIR/checkpoints/last.ckpt")
+fi
+
+echo "Working directory: $PWD"
+echo "Target epochs: $TARGET_EPOCHS"
+echo "Python: $(which python)"
+python --version
+nvidia-smi
+
+python -u train_m3gnet_linear_atomic_sum_full_matpes.py "${ARGS[@]}"

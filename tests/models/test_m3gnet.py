@@ -11,6 +11,7 @@ from pymatgen.core import Structure
 import matgl
 from matgl.ext.pymatgen import Structure2Graph
 from matgl.graph._compute import compute_pair_vector_and_distance
+from matgl.layers._readout_torch import LinearAtomicReadOut
 from matgl.models import M3GNet
 
 PARITY_ARTIFACT = Path(__file__).resolve().parents[1] / "parity_data" / "m3gnet_parity.pt"
@@ -39,6 +40,23 @@ def test_model(graph_MoS):
     os.remove("model.pt")
     os.remove("model.json")
     os.remove("state.pt")
+
+
+def test_linear_atomic_sum_baseline(graph_MoS):
+    """The matched baseline uses a linear atomic head and contains no Transformer encoder."""
+    structure, graph, _ = graph_MoS
+    graph = _prep_graph(graph, structure)
+    model = M3GNet(
+        element_types=("Mo", "S"),
+        is_intensive=False,
+        readout_type="linear_atomic_sum",
+    )
+
+    output = model(g=graph)
+
+    assert torch.numel(output) == 1
+    assert isinstance(model.final_layer, LinearAtomicReadOut)
+    assert not any(isinstance(module, torch.nn.TransformerEncoder) for module in model.modules())
 
 
 def test_exceptions():

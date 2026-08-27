@@ -89,7 +89,13 @@ from matgl.layers import (
     SphericalBesselWithHarmonics,#对应公式2，把三体几何距离+角度变成三体特征向量
     ThreeBodyInteractions,#三体信息聚合回边e_ij
 )
-from matgl.layers._readout_torch import ReduceReadOut, TransformerAtomicReadOut, WeightedAtomReadOut, WeightedReadOut  # Reduce/Weighted readout，用于普通性质或势能分支
+from matgl.layers._readout_torch import (
+    LinearAtomicReadOut,
+    ReduceReadOut,
+    TransformerAtomicReadOut,
+    WeightedAtomReadOut,
+    WeightedReadOut,
+)
 from matgl.utils.cutoff import polynomial_cutoff  # 三体 cutoff，让远距离三体作用平滑衰减到 0
 
 from ._core import MatGLModel, _warn_feature_dict_kwarg
@@ -117,7 +123,9 @@ class M3GNet(MatGLModel):
         nblocks: int = 3,  # M3GNet 层数，每层先 three-body 再 graph conv
         rbf_type: Literal["Gaussian", "SphericalBessel"] = "SphericalBessel",  # 二体距离展开方式，默认球贝塞尔
         is_intensive: bool = True,  # True 做普通性质预测；False 做总能量/势函数 sum
-        readout_type: Literal["set2set", "weighted_atom", "reduce_atom", "transformer"] = "weighted_atom",  # 普通性质预测时的聚合方式,我加入了 transformer 方式
+        readout_type: Literal[
+            "set2set", "weighted_atom", "reduce_atom", "transformer", "linear_atomic_sum"
+        ] = "weighted_atom",  # 普通性质预测时的聚合方式,我加入了 transformer 方式
         transformer_nhead: int = 8,  # Transformer readout 的多头 attention 头数
         transformer_num_layers: int = 3,  # TransformerEncoderLayer 堆叠层数
         transformer_dim_ff: int = 256,  # Transformer 内部 FFN/MLP 隐藏维度
@@ -251,6 +259,11 @@ class M3GNet(MatGLModel):
                     num_layers = transformer_num_layers,
                     dim_ff = transformer_dim_ff,
                     dropout = transformer_dropout,
+                )
+            elif readout_type == "linear_atomic_sum":
+                self.final_layer = LinearAtomicReadOut(
+                    in_feats=dim_node_embedding,
+                    num_targets=ntargets,
                 )
             else:
                 self.final_layer = WeightedReadOut(  # type: ignore[assignment]
@@ -394,7 +407,7 @@ class M3GNet(MatGLModel):
                 #Transformer 需要 batch，以保证每个结构只在自己的原子之间做 attention
                 atomic = self.final_layer(node_feat, batch) #这里的final layer是前面初始化的，根据输入readout_type不同而不同
             else:
-                atomic = self.final_layer(node_feat)  # 原本M3GNET，逐原子GATED MLP不需要batch
+                atomic = self.final_layer(node_feat)  # Gated or linear per-atom readout; grouping is handled below.
             fea_dict["readout"] = atomic
             atomic = atomic.view(-1)
             if batch is None:

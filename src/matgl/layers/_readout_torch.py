@@ -167,6 +167,18 @@ class WeightedReadOut(nn.Module):
     def forward(self, node_feat: torch.Tensor) -> torch.Tensor:
         return self.gated(node_feat)
 
+
+class LinearAtomicReadOut(nn.Module):
+    """Map each atomic feature directly to an atomic-energy contribution."""
+
+    def __init__(self, in_feats: int, num_targets: int):
+        super().__init__()
+        self.atomic_head = nn.Linear(in_feats, num_targets)
+
+    def forward(self, node_feat: torch.Tensor) -> torch.Tensor:
+        return self.atomic_head(node_feat)
+
+
 class TransformerAtomicReadOut(nn.Module):  # 定义 transformer readout 类
     """Transformer encoder with a linear per-atom energy head."""
 
