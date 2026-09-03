@@ -1,0 +1,36 @@
+#!/bin/bash
+
+#PBS -P xq82
+#PBS -q gpuhopper
+#PBS -N tf_interface_md_100k
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=256GB
+#PBS -l jobfs=20GB
+#PBS -l walltime=48:00:00
+#PBS -l storage=scratch/xq82
+#PBS -l wd
+#PBS -j oe
+
+set -euo pipefail
+
+source /scratch/xq82/bd1444/diepformer_dgl_work/miniforge3/etc/profile.d/conda.sh
+conda activate /scratch/xq82/bd1444/matglformer_linear_work/envs/matgl-linear
+
+# Use the modified MatGL source from this newly cloned repository.
+export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
+export OMP_NUM_THREADS=1
+
+python -u interface_md_no_oganesson.py \
+  --cif "$PWD/interface_simulation/Li_LGPS_30_10_300.0_first.cif" \
+  --checkpoint "$PWD/interface_simulation/checkpoints/best-epoch=196-step=600062.ckpt" \
+  --output-dir "$PWD/runs/interface_md_100000_300K" \
+  --temperature 300 \
+  --freeze-size 4 \
+  --relax-fmax 0.8 \
+  --relax-steps 1000 \
+  --relax-maxstep 0.2 \
+  --ensemble nvt \
+  --timestep-fs 1.0 \
+  --md-steps 100000 \
+  --loginterval 10
